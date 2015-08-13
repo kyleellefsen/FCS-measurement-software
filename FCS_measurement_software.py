@@ -22,8 +22,9 @@ from numpy import zeros
 import pyqtgraph as pg
 import random
 import scipy.io
+import time
 
-samplePeriod=100 # microseconds
+sampleInterval=20.04 # microseconds
 
 
 class DiodeValueWidget(QWidget) :
@@ -49,13 +50,21 @@ class DiodeValueWidget(QWidget) :
         ## buttons ##
         
         self.control_panel=QGridLayout()
+        self.sampleInterval_spinbox =QDoubleSpinBox()
+        self.sampleInterval_spinbox.setSingleStep(.01)
+        self.sampleInterval_spinbox.setMinimum(1)
+        self.sampleInterval_spinbox.setMaximum(1000)
+        self.sampleInterval_spinbox.setValue(sampleInterval)
+        self.sampleInterval_spinbox.valueChanged.connect(self.setSampleInterval)
         self.stop=False
         self.start_stop_button=QPushButton('Stop')
         self.start_stop_button.pressed.connect(self.start_stop)
         self.exportButton=QPushButton('Export')
         self.exportButton.pressed.connect(self.export_gui)
-        self.control_panel.addWidget(self.start_stop_button,0,0)
-        self.control_panel.addWidget(self.exportButton,1,0)
+        self.control_panel.addWidget(QLabel('Sample Interval (microseconds)'),0,0)
+        self.control_panel.addWidget(self.sampleInterval_spinbox,0,1)
+        self.control_panel.addWidget(self.start_stop_button,1,1)
+        self.control_panel.addWidget(self.exportButton,2,1)
         self.control_panelWidget=QWidget()
         self.control_panelWidget.setLayout(self.control_panel)
         self.l.addWidget(self.control_panelWidget)
@@ -64,7 +73,7 @@ class DiodeValueWidget(QWidget) :
         self.analog_data=[] #np.zeros(100,dtype=np.float64)
         self.timer=QTimer()
         self.timer.timeout.connect(self.update)
-        self.timer.start(10)
+        self.timer.start(20)
         self.analogInputThread=AnalogInputThread(self)
         #self.connect(thread , QtCore.SIGNAL('update(QString)') , self.change)
         self.analogInputThread.start()
@@ -92,20 +101,29 @@ class DiodeValueWidget(QWidget) :
             self.start_input_thread()
             
     def stop_input_thread(self):
-        self.analogInputThread.stop=True
-        self.timer.stop()
-        self.start_stop_button.setText('Start')
-        self.stop=True
-        print('Input thread stopped')
+        if self.stop==False:
+            self.analogInputThread.stop=True
+            self.timer.stop()
+            self.start_stop_button.setText('Start')
+            self.stop=True
+            print('Input thread stopped')
         
     def start_input_thread(self):
-        self.analog_data=[]
-        self.timer.start(10)
-        self.analogInputThread=AnalogInputThread(self)
-        self.analogInputThread.start()
-        self.start_stop_button.setText('Stop')
-        self.stop=False
-        print('Input thread restarted')
+        if self.stop==True:
+            self.analog_data=[]
+            self.timer.start(10)
+            self.analogInputThread=AnalogInputThread(self)
+            self.analogInputThread.start()
+            self.start_stop_button.setText('Stop')
+            self.stop=False
+            print('Input thread restarted')
+        
+    def setSampleInterval(self,value):
+        global sampleInterval
+        self.stop_input_thread()
+        sampleInterval=value
+        time.sleep(.1)
+        self.start_input_thread()
 
 
     def export_gui(self):
@@ -142,8 +160,8 @@ class AnalogInputThread(QThread):
         self.stop=False
 
     def run(self):
-        global samplePeriod
-        capture_rate=1/(samplePeriod/1000000)
+        global sampleInterval
+        capture_rate=1/(sampleInterval/1000000)
         taskHandle=TaskHandle()
         self.th=taskHandle
         DAQmxCreateTask("",byref(taskHandle))
