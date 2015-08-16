@@ -20,12 +20,30 @@ from PyDAQmx import *
 from PyDAQmx.DAQmxCallBack import *
 from numpy import zeros
 import pyqtgraph as pg
+from pyqtgraph import plot
+from pyqtgraph.dockarea import *
 import random
 import scipy.io
 import time
+from scipy.fftpack import fft, fftfreq, fftshift
 
-sampleInterval=20.04 # microseconds
 
+sampleInterval=20.05 # microseconds
+# To get all the data collected so far, call
+#data=np.array(self.analog_data).ravel()
+
+def estimated_autocorrelation(x):
+    """
+    http://stackoverflow.com/q/14297012/190597
+    http://en.wikipedia.org/wiki/Autocorrelation#Estimation
+    """
+    n = len(x)
+    variance = x.var()
+    x = x-x.mean()
+    r = np.correlate(x, x, mode = 'full')[-n:]
+    #assert np.allclose(r, np.array([(x[:n-k]*x[-(n-k):]).sum() for k in range(n)]))
+    result = r/(variance*(np.arange(n, 0, -1)))
+    return result
 
 class DiodeValueWidget(QWidget) :
     """
@@ -33,67 +51,166 @@ class DiodeValueWidget(QWidget) :
     """
     def __init__(self, parent = None) :
         QWidget.__init__(self, parent)
-        self.setGeometry(100, 100, 600, 600)
+        self.setGeometry(9, 32, 1268, 600)
         self.setWindowTitle( "FCS Measurement software" )
         
-        ## plotting ##
+        ## set layout ##
         self.l = QVBoxLayout()
         self.setLayout(self.l)
+        self.area = DockArea()
+        self.l.addWidget(self.area)
+        
+        ## plotting live input
+        self.d1 = Dock("Live input",size=(1164, 437))
+        self.area.addDock(self.d1)
         self.plt=pg.PlotWidget()
+        self.d1.addWidget(self.plt)
         self.plt.showGrid(x=True, y=True)
-        self.l.addWidget(self.plt)
-        self.x=np.arange(100,dtype=np.float64)
-        self.y=np.zeros(100,dtype=np.float64)
+        self.x=np.arange(100,dtype=np.float64)+1
+        self.y=np.zeros(100,dtype=np.float64)+1
         self.curve = self.plt.plot(self.x, self.y, pen=(255,0,0))
         self.plt.setYRange(-2,10.2)
+        self.plt.setLabel('bottom','Time',units='s')
+        self.plt.setLabel('left','Raw Input',units='V')
+        
+        ## plotting histogram ##
+        self.d2 = Dock("Histogram")
+        self.area.addDock(self.d2,'right',size=(382, 216))
+        self.histplt=pg.PlotWidget()
+        self.d2.addWidget(self.histplt)
+        self.histplt.showGrid(x=True, y=True)
+        self.hist = self.histplt.plot(self.x, self.y,  fillLevel=0, brush=(0,0,255,150))
+        self.histplt.setXRange(-1,5)
+        self.histplt.setLabel('bottom','Input Voltage',units='V')
+        self.histplt.setLabel('left','Counts')
+        
+        ## plotting fft ##
+        self.d3 = Dock("FFT")
+        self.area.addDock(self.d3,'bottom',self.d2,size=(382, 216))
+        self.fftplt=pg.PlotWidget()
+        self.d3.addWidget(self.fftplt)
+        self.fftplt.showGrid(x=True, y=True)
+        self.fftplt.setLogMode(x=True,y=True)
+        self.fftcurve = self.fftplt.plot(self.x, self.y,  pen=(0,225,0))
+        self.fftplt.setLabel('bottom','Frequency')
+        self.fftplt.setLabel('left','Absolute Value of Amplitude ')
+        
+        ## plotting autocorr ##
+        self.d4 = Dock("Auto Correlation")
+        self.area.addDock(self.d4,'bottom',self.d3,size=(382, 216))
+        self.autocorrplt=pg.PlotWidget()
+        self.d4.addWidget(self.autocorrplt)
+        self.autocorrplt.showGrid(x=True, y=True)
+        self.autocorrcurve = self.autocorrplt.plot(self.x, self.y,  pen=(255,225,0))
+        #self.autocorrplt.setXRange(0,100)
+        self.autocorrplt.setYRange(-.1,.1)
+        self.autocorrplt.setXRange(0,.1)
+        self.autocorrplt.setLabel('bottom','Lag Times',units='s')
+        self.autocorrplt.setLogMode(x=False,y=False)
         
         ## buttons ##
-        
         self.control_panel=QGridLayout()
         self.sampleInterval_spinbox =QDoubleSpinBox()
         self.sampleInterval_spinbox.setSingleStep(.01)
+        self.sampleInterval_spinbox.setDecimals(4)
         self.sampleInterval_spinbox.setMinimum(1)
-        self.sampleInterval_spinbox.setMaximum(1000)
+        self.sampleInterval_spinbox.setMaximum(10000)
         self.sampleInterval_spinbox.setValue(sampleInterval)
         self.sampleInterval_spinbox.valueChanged.connect(self.setSampleInterval)
         self.stop=False
         self.start_stop_button=QPushButton('Stop')
         self.start_stop_button.pressed.connect(self.start_stop)
+        self.averageOn=False
+        self.nAveraged=0
+        self.nAveraged_corr=0
+        self.averageButton=QPushButton('Average')
+        self.averageButton.pressed.connect(self.altAverage)
         self.exportButton=QPushButton('Export')
         self.exportButton.pressed.connect(self.export_gui)
         self.control_panel.addWidget(QLabel('Sample Interval (microseconds)'),0,0)
         self.control_panel.addWidget(self.sampleInterval_spinbox,0,1)
         self.control_panel.addWidget(self.start_stop_button,1,1)
         self.control_panel.addWidget(self.exportButton,2,1)
+        self.samplesAveragedLabel=QLabel('Samples Averaged: 0')
+        self.control_panel.addWidget(self.samplesAveragedLabel,3,0)
+        self.control_panel.addWidget(self.averageButton,3,1)
         self.control_panelWidget=QWidget()
         self.control_panelWidget.setLayout(self.control_panel)
+        self.control_panelWidget.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed)
         self.l.addWidget(self.control_panelWidget)
         
         ## acquire data from analog input thread##
         self.analog_data=[] #np.zeros(100,dtype=np.float64)
         self.timer=QTimer()
+        self.timer_slow=QTimer()
         self.timer.timeout.connect(self.update)
-        self.timer.start(20)
+        self.timer.timeout.connect(self.updateHistogram)
+        self.timer_slow.timeout.connect(self.updatefftplt)
+        self.timer_slow.timeout.connect(self.updateAutoCorr)
+        self.timer.start(50)
+        self.timer_slow.start(30)
+        
         self.analogInputThread=AnalogInputThread(self)
-        #self.connect(thread , QtCore.SIGNAL('update(QString)') , self.change)
         self.analogInputThread.start()
     def paintEvent( self, event ) :
-        #self.analogInputThread.stop=True
         if len(self.analog_data)==0:
             pass
         else:
             y=np.array(self.analog_data[-100:])
-            self.y=y.reshape((y.shape[0]*y.shape[1]))
-            self.x=np.arange(len(self.y))
+            self.y=y.ravel()
+            self.x = np.linspace(0.0, len(self.y)*sampleInterval, len(self.y))/1000000. #microseconds to seconds
             #self.y=self.analog_data[-1]
         self.curve.setData(self.x, self.y)
         pass
-        #print(self.analog_data)
-        #qp = QPainter()
-        #qp.begin( self )
-        #self.drawArcs(qp)
-        #self.drawSpots(qp)
-        #qp.end()
+
+    def updateHistogram(self):
+        unique,counts=np.unique(np.array(self.analog_data[-100:]),return_counts=True)
+        self.hist.setData(unique,counts)
+
+    def updatefftplt(self):
+        a=np.array(self.analog_data[-100:]).ravel()
+        N = 8192
+        sampleInterval_S=sampleInterval/1000000  #microseconds to seconds
+        if len(a)>N:
+            # sample spacing
+            x = np.linspace(0.0, N*sampleInterval_S, N)
+            yf = fft(a[-N:])
+            xf = fftfreq(N, sampleInterval_S)
+            xf=xf[1:N/2]
+            yf=np.abs(yf[1:N/2])
+            if self.averageOn==True:
+                self.averaged_fft=(self.averaged_fft*self.nAveraged+yf)/(self.nAveraged+1)
+                self.nAveraged+=1
+                self.fftcurve.setData(xf, self.averaged_fft)
+                self.samplesAveragedLabel.setText('Samples Averaged: {}'.format(self.nAveraged))
+            else:
+                self.fftcurve.setData(xf, yf)    
+    def updateAutoCorr(self):
+        a=np.array(self.analog_data[-100:]).ravel()
+        if len(a)>1000:
+            corr=estimated_autocorrelation(a)
+            x = np.linspace(0.0, len(a)*sampleInterval, len(a))/1000000. #microseconds to seconds
+            if self.averageOn==True and len(a)==10000:
+                self.averaged_corr=(self.averaged_corr*self.nAveraged_corr+corr)/(self.nAveraged_corr+1)
+                self.nAveraged_corr+=1
+                self.autocorrcurve.setData(x,self.averaged_corr)
+            else:
+                self.autocorrcurve.setData(x,corr)
+    def altAverage(self):
+        if self.averageOn:
+            self.averageButton.setText('Average')
+            self.samplesAveragedLabel.setText('Samples Averaged: 0')
+            self.averageOn=False
+        else:
+            self.averageButton.setText('Stop Averaging')
+            self.nAveraged=0
+            self.nAveraged_corr=0
+            N=8192
+            self.averaged_fft=np.zeros(N/2-1)
+            N=10000
+            self.averaged_corr=np.zeros(N)
+            self.averageOn=True
+
     def start_stop(self):
         if self.stop==False:
             self.stop_input_thread()
@@ -104,6 +221,7 @@ class DiodeValueWidget(QWidget) :
         if self.stop==False:
             self.analogInputThread.stop=True
             self.timer.stop()
+            self.timer_slow.stop()
             self.start_stop_button.setText('Start')
             self.stop=True
             print('Input thread stopped')
@@ -111,7 +229,8 @@ class DiodeValueWidget(QWidget) :
     def start_input_thread(self):
         if self.stop==True:
             self.analog_data=[]
-            self.timer.start(10)
+            self.timer.start(20)
+            self.timer_slow.start(50)
             self.analogInputThread=AnalogInputThread(self)
             self.analogInputThread.start()
             self.start_stop_button.setText('Stop')
@@ -136,14 +255,14 @@ class DiodeValueWidget(QWidget) :
         else:
             self.export(filename)
     def export(self,filename=None):
-        data=np.array(self.analog_data)
-        data=data.reshape((data.shape[0]*data.shape[1]))
+        data=np.array(self.analog_data).ravel()
         #output_file = open(filename, 'wb')
         #data.tofile(output_file)
         #output_file.close()
         scipy.io.savemat(filename, {'FCS_data':data})
         print('Exported data')
 
+    
         
         
 class MyList(list):
@@ -161,8 +280,8 @@ class AnalogInputThread(QThread):
 
     def run(self):
         global sampleInterval
-        capture_rate=1/(sampleInterval/1000000)
-        taskHandle=TaskHandle()
+        capture_rate=int(np.round(1./(sampleInterval/1000000.)))
+        taskHandle=TaskHandle(0)
         self.th=taskHandle
         DAQmxCreateTask("",byref(taskHandle))
         DAQmxCreateAIVoltageChan(taskHandle,"Dev1/ai0","",DAQmx_Val_Cfg_Default,-10.0,10.0,DAQmx_Val_Volts,None)
@@ -171,11 +290,9 @@ class AnalogInputThread(QThread):
         DAQmxRegisterEveryNSamplesEvent(taskHandle,DAQmx_Val_Acquired_Into_Buffer,100,0,self.EveryNCallback,self.id_a)
         DAQmxRegisterDoneEvent(taskHandle,0,self.DoneCallback,None)
         
+
+        
         DAQmxStartTask(taskHandle)
-    
-        #raw_input('Acquiring samples continuously. Press Enter to interrupt\n')
-        #DAQmxStopTask(taskHandle)
-        #DAQmxClearTask(taskHandle)
         
     def EveryNCallback_py(self, taskHandle, everyNsamplesEventType, nSamples, callbackData_ptr):
         #callbackdata = get_callbackdata_from_id(callbackData_ptr)
@@ -200,8 +317,8 @@ class AnalogInputThread(QThread):
         
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    w = DiodeValueWidget()
-    w.show()
+    self = DiodeValueWidget()
+    self.show()
     insideSpyder='SPYDER_SHELL_ID' in os.environ
     if not insideSpyder: #if we are running outside of Spyder
         sys.exit(app.exec_()) #This is required to run outside of Spyder
