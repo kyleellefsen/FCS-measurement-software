@@ -26,9 +26,10 @@ import random
 import scipy.io
 import time
 from scipy.fftpack import fft, fftfreq, fftshift
+from exponential_fitting import fit_exponential
 
 
-sampleInterval=20.05 # microseconds
+sampleInterval=20 # microseconds
 # To get all the data collected so far, call
 #data=np.array(self.analog_data).ravel()
 
@@ -69,9 +70,9 @@ class DiodeValueWidget(QWidget) :
         self.x=np.arange(100,dtype=np.float64)+1
         self.y=np.zeros(100,dtype=np.float64)+1
         self.curve = self.plt.plot(self.x, self.y, pen=(255,0,0))
-        self.plt.setYRange(-2,10.2)
+        self.plt.setYRange(0,70)
         self.plt.setLabel('bottom','Time',units='s')
-        self.plt.setLabel('left','Raw Input',units='V')
+        self.plt.setLabel('left','Photon counts')
         
         ## plotting histogram ##
         self.d2 = Dock("Histogram")
@@ -79,9 +80,9 @@ class DiodeValueWidget(QWidget) :
         self.histplt=pg.PlotWidget()
         self.d2.addWidget(self.histplt)
         self.histplt.showGrid(x=True, y=True)
-        self.hist = self.histplt.plot(self.x, self.y,  fillLevel=0, brush=(0,0,255,150))
-        self.histplt.setXRange(-1,5)
-        self.histplt.setLabel('bottom','Input Voltage',units='V')
+        self.hist = self.histplt.plot(self.x, self.y[:-1],  fillLevel=0, brush=(0,0,255,150), stepMode=True) #,
+        self.histplt.setXRange(-1,100)
+        self.histplt.setLabel('bottom','Number of Photons')
         self.histplt.setLabel('left','Counts')
         
         ## plotting fft ##
@@ -128,15 +129,31 @@ class DiodeValueWidget(QWidget) :
         self.previous_averaged_corrs=[]
         self.averageButton=QPushButton('Average')
         self.averageButton.pressed.connect(self.altAverage)
-        self.exportButton=QPushButton('Export')
+        self.exportButton=QPushButton('Export Raw Trace')
         self.exportButton.pressed.connect(self.export_gui)
+        self.exportCorrButton=QPushButton('Export Correlation')
+        self.exportCorrButton.pressed.connect(self.export_corr_gui)
         self.control_panel.addWidget(QLabel('Sample Interval (microseconds)'),0,0)
         self.control_panel.addWidget(self.sampleInterval_spinbox,0,1)
         self.control_panel.addWidget(self.start_stop_button,1,1)
-        self.control_panel.addWidget(self.exportButton,2,1)
+        self.control_panel.addWidget(self.exportButton,2,0)
+        self.control_panel.addWidget(self.exportCorrButton,2,1)
         self.samplesAveragedLabel=QLabel('Samples Averaged: 0')
-        self.control_panel.addWidget(self.samplesAveragedLabel,3,0)
-        self.control_panel.addWidget(self.averageButton,3,1)
+        self.control_panel.addWidget(self.samplesAveragedLabel,4,0)
+        self.control_panel.addWidget(self.averageButton,4,1)
+        
+        self.control_panel.addWidget(QLabel('Order of Exponential Fit'),5,0)
+        self.exp_order=QComboBox()
+        self.exp_order.addItem('1')
+        self.exp_order.addItem('2')
+        self.exp_order.addItem('3')
+        self.control_panel.addWidget(self.exp_order,5,1)
+        self.fitButton=QPushButton('Fit')
+        self.fitButton.pressed.connect(self.fit_exponential)
+        self.control_panel.addWidget(self.fitButton,5,2)
+        self.exponential_label=QLabel('Parameters:')
+        self.control_panel.addWidget(self.exponential_label,5,3)
+        
         self.control_panelWidget=QWidget()
         self.control_panelWidget.setLayout(self.control_panel)
         self.control_panelWidget.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed)
@@ -151,7 +168,7 @@ class DiodeValueWidget(QWidget) :
         self.timer_slow.timeout.connect(self.updatefftplt)
         self.timer_slow.timeout.connect(self.updateAutoCorr)
         self.timer.start(50)
-        self.timer_slow.start(200)
+        self.timer_slow.start(80)
         
         self.analogInputThread=AnalogInputThread(self)
         self.analogInputThread.start()
@@ -159,7 +176,7 @@ class DiodeValueWidget(QWidget) :
         if len(self.analog_data)==0:
             pass
         else:
-            y=np.array(self.analog_data[-100:])
+            y=np.array(self.analog_data[-10:])
             self.y=y.ravel()
             self.x = np.linspace(0.0, len(self.y)*sampleInterval, len(self.y))/1000000. #microseconds to seconds
             #self.y=self.analog_data[-1]
@@ -167,11 +184,14 @@ class DiodeValueWidget(QWidget) :
         pass
 
     def updateHistogram(self):
-        unique,counts=np.unique(np.array(self.analog_data[-100:]),return_counts=True)
-        self.hist.setData(unique,counts)
+        #unique,counts=np.unique(np.array(self.analog_data[-100:]),return_counts=True)
+        if len(self.analog_data)>1:
+            a=np.array(self.analog_data[-10:])
+            counts,bin_edges=np.histogram(a,bins=np.arange(0,200))
+            self.hist.setData(bin_edges,counts)
 
     def updatefftplt(self):
-        a=np.array(self.analog_data[-100:]).ravel()
+        a=np.array(self.analog_data[-10:]).ravel()
         N = 8192
         sampleInterval_S=sampleInterval/1000000  #microseconds to seconds
         if len(a)>N:
@@ -189,7 +209,7 @@ class DiodeValueWidget(QWidget) :
             else:
                 self.fftcurve.setData(xf, yf)    
     def updateAutoCorr(self):
-        a=np.array(self.analog_data[-100:]).ravel()
+        a=np.array(self.analog_data[-10:]).ravel()
         if len(a)>1000:
             corr=estimated_autocorrelation(a)
             x = np.linspace(0.0, len(a)*sampleInterval, len(a))/1000000. #microseconds to seconds
@@ -199,6 +219,24 @@ class DiodeValueWidget(QWidget) :
                 self.autocorrcurve.setData(x[1:],self.averaged_corr[1:])
             else:
                 self.autocorrcurve.setData(x[1:],corr[1:])
+    def fit_exponential(self):
+        if self.averageOn:
+            y=self.averaged_corr
+            x=np.linspace(0.0, len(y)*sampleInterval/1000000., len(y), endpoint=False) #microseconds to seconds
+            y=y[1:]
+            x=x[1:]        
+            order=int(self.exp_order.currentText())
+            popt,yfit=fit_exponential(x,y,order)
+            self.autocorrfitcurve = self.autocorrplt.plot(x, yfit,  pen=(0,225,255))
+            if order==1:
+                text="A1*exp(x/t1), A1={}, t1={}".format(*popt)
+            elif order==2:
+                text="A1*exp(x/t1)+A2*exp(x/t2), A1={}, t1={}, A2={}, t2={}".format(*popt)
+            elif order==3:
+                text="A1*exp(x/t1)+A2*exp(x/t2)+A3*exp(x/t3), A1={}, t1={}, A2={}, t2={},A3={}, t3={}".format(*popt)
+        else:
+            text="You must be averaging the autocorrelation in order to fit it"
+        self.exponential_label.setText(text)
     def altAverage(self):
         if self.averageOn:
             self.averageButton.setText('Average')
@@ -267,8 +305,21 @@ class DiodeValueWidget(QWidget) :
         scipy.io.savemat(filename, {'FCS_data':data, 'averaged_corr':self.averaged_corr})
         print('Exported data')
 
-    
-        
+    def export_corr_gui(self):
+        if self.stop==False:
+            self.stop_input_thread()
+        filename= QFileDialog.getSaveFileName(self, 'Export Correlation', r'C:/Users/Admin/Desktop/','*.txt')
+        filename=str(filename)
+        if filename=='':
+            return False
+        else:
+            self.export_corr(filename)
+    def export_corr(self,filename=None):
+        y=self.averaged_corr
+        x=np.linspace(0.0, len(y)*sampleInterval/1000000., len(y), endpoint=False) #microseconds to seconds
+        data=np.array([x,y]).T
+        np.savetxt(filename, data,fmt='%10.6f')
+        print('Exported Correlation Data')
         
 class MyList(list):
     pass
@@ -282,6 +333,8 @@ class AnalogInputThread(QThread):
         self.EveryNCallback = DAQmxEveryNSamplesEventCallbackPtr(self.EveryNCallback_py)
         self.DoneCallback = DAQmxDoneEventCallbackPtr(self.DoneCallback_py)
         self.stop=False
+        self.nSamples=1000
+        self.previousValue=0
 
     def run(self):
         global sampleInterval
@@ -289,10 +342,10 @@ class AnalogInputThread(QThread):
         taskHandle=TaskHandle(0)
         self.th=taskHandle
         DAQmxCreateTask("",byref(taskHandle))
-        DAQmxCreateAIVoltageChan(taskHandle,"Dev1/ai0","",DAQmx_Val_Cfg_Default,-10.0,10.0,DAQmx_Val_Volts,None)
-        DAQmxCfgSampClkTiming(taskHandle,"PFI0",capture_rate,DAQmx_Val_Rising,DAQmx_Val_ContSamps,100)
+        DAQmxCreateCICountEdgesChan(taskHandle,"Dev1/ctr0","",DAQmx_Val_Rising,0,DAQmx_Val_CountUp) # ctr0 gets its input from PFI8
+        DAQmxCfgSampClkTiming(taskHandle,"/Dev1/PFI0",capture_rate,DAQmx_Val_Rising,DAQmx_Val_ContSamps,self.nSamples) #PFI0 sets the timing. 
         
-        DAQmxRegisterEveryNSamplesEvent(taskHandle,DAQmx_Val_Acquired_Into_Buffer,100,0,self.EveryNCallback,self.id_a)
+        DAQmxRegisterEveryNSamplesEvent(taskHandle,DAQmx_Val_Acquired_Into_Buffer,self.nSamples,0,self.EveryNCallback,self.id_a)
         DAQmxRegisterDoneEvent(taskHandle,0,self.DoneCallback,None)
         
 
@@ -302,15 +355,22 @@ class AnalogInputThread(QThread):
     def EveryNCallback_py(self, taskHandle, everyNsamplesEventType, nSamples, callbackData_ptr):
         #callbackdata = get_callbackdata_from_id(callbackData_ptr)
         read = int32()
-        data = zeros(100) #1 channel times 100 samples per channel = 100
+        data = zeros(self.nSamples,dtype=np.uint32) #1 channel times 100 samples per channel = 100
 
+        
 
-
-
-        DAQmxReadAnalogF64(taskHandle,100,10.0,DAQmx_Val_GroupByChannel,data,100,byref(read),None)
+        DAQmxReadCounterU32(taskHandle,self.nSamples,-1,data,self.nSamples,byref(read),None)
         #callbackdata.extend(data.tolist())
         #print "Acquired total %d samples"%len(data)
-        self.diodeValueWidget.analog_data.append(data)
+        
+        data2=np.append([self.previousValue],data[:-1])
+        diff=data-data2
+        
+        #if np.any(data<data2): #when we overflow, we need to figure out what the real number was
+        #    idx=np.where(data<data2)[0][0]
+        #    diff[idx]=(data[idx]+2**32-1)-data2[idx]
+        self.diodeValueWidget.analog_data.append(diff)
+        self.previousValue=data[-1]
         if self.stop:
             DAQmxStopTask(taskHandle)
             DAQmxClearTask(taskHandle)
@@ -319,7 +379,7 @@ class AnalogInputThread(QThread):
         return 0 # The function should return an integer
 
     def DoneCallback_py(self,taskHandle, status, callbackData):
-        print "Status",status.value
+        #print "Status",status.value
         return 0 # The function should return an integer
     
 
@@ -331,3 +391,5 @@ if __name__ == '__main__':
     insideSpyder='SPYDER_SHELL_ID' in os.environ
     if not insideSpyder: #if we are running outside of Spyder
         sys.exit(app.exec_()) #This is required to run outside of Spyder
+    
+    
